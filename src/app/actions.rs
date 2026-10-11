@@ -9,7 +9,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(test)]
-use crate::layout::{find_in_direction, NavDirection};
+use crate::layout::{find_in_direction_by_recency, NavDirection};
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
 
@@ -752,7 +752,10 @@ impl AppState {
         };
 
         if let Some(focused) = panes.iter().find(|p| p.is_focused) {
-            if let Some(target) = find_in_direction(focused, direction, &panes) {
+            let target = find_in_direction_by_recency(focused, direction, &panes, |id| {
+                tab.layout.focus_rank(id)
+            });
+            if let Some(target) = target {
                 self.focus_pane_in_workspace(ws_idx, target);
             }
         }
@@ -775,7 +778,9 @@ impl AppState {
         let Some(focused) = panes.iter().find(|p| p.is_focused) else {
             return false;
         };
-        let Some(target) = find_in_direction(focused, direction, &panes) else {
+        let Some(target) = find_in_direction_by_recency(focused, direction, &panes, |id| {
+            tab.layout.focus_rank(id)
+        }) else {
             return false;
         };
         let source = focused.id;

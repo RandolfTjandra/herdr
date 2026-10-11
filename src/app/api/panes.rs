@@ -20,7 +20,7 @@ use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
 #[cfg(test)]
 use crate::app::Mode;
-use crate::layout::{find_in_direction, NavDirection, PaneId};
+use crate::layout::{find_in_direction_by_recency, NavDirection, PaneId};
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, normalize_metadata_source, normalize_metadata_tokens,
@@ -2113,7 +2113,9 @@ impl App {
         let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
         let panes = tab.layout.panes(self.state.view.terminal_area);
         let source = panes.iter().find(|pane| pane.id == source_pane_id)?;
-        find_in_direction(source, direction.into(), &panes)
+        find_in_direction_by_recency(source, direction.into(), &panes, |id| {
+            tab.layout.focus_rank(id)
+        })
     }
 
     pub(super) fn pane_layout_snapshot(

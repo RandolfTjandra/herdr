@@ -89,6 +89,10 @@ pub struct TileLayout {
     /// (`split_pane`, `close_pane`, unfocused `insert_pane_near`) so internal
     /// focus excursions never corrupt it.
     prev_focus: Option<PaneId>,
+    /// Panes in most-recently-focused order, excluding `focus`. Directional
+    /// navigation uses it to return to the pane last visited on that side
+    /// instead of always landing on the first aligned candidate.
+    focus_history: Vec<PaneId>,
 }
 
 impl TileLayout {
@@ -101,6 +105,7 @@ impl TileLayout {
                 root: Node::Pane(root_id),
                 focus: root_id,
                 prev_focus: None,
+                focus_history: Vec::new(),
             },
             root_id,
         )
@@ -110,8 +115,22 @@ impl TileLayout {
     fn set_focus(&mut self, id: PaneId) {
         if id != self.focus {
             self.prev_focus = Some(self.focus);
+            self.focus_history.retain(|pane| *pane != id);
+            self.focus_history.insert(0, self.focus);
             self.focus = id;
         }
+    }
+
+    /// Focus recency rank: 0 for the focused pane, 1 for the pane focused
+    /// before it, and so on. Panes never focused rank last.
+    pub fn focus_rank(&self, id: PaneId) -> usize {
+        if id == self.focus {
+            return 0;
+        }
+        self.focus_history
+            .iter()
+            .position(|pane| *pane == id)
+            .map_or(usize::MAX, |pos| pos + 1)
     }
 
     pub fn focused(&self) -> PaneId {
@@ -243,6 +262,8 @@ impl TileLayout {
             self.root = new_root;
             self.focus = new_focus;
             self.prev_focus = None;
+            self.focus_history
+                .retain(|pane| *pane != target && *pane != new_focus);
             true
         } else {
             false
@@ -267,6 +288,7 @@ impl TileLayout {
         if self.prev_focus == Some(id) {
             self.prev_focus = None;
         }
+        self.focus_history.retain(|pane| *pane != id);
         true
     }
 
@@ -359,6 +381,7 @@ impl TileLayout {
             root,
             focus,
             prev_focus: None,
+            focus_history: Vec::new(),
         }
     }
 }
@@ -366,10 +389,22 @@ impl TileLayout {
 // --- Directional pane navigation ---
 
 /// Find the nearest pane in the given direction from `focused`.
+#[cfg(test)]
 pub fn find_in_direction(
     focused: &PaneInfo,
     direction: NavDirection,
     panes: &[PaneInfo],
+) -> Option<PaneId> {
+    find_in_direction_by_recency(focused, direction, panes, |_| 0)
+}
+
+/// Like `find_in_direction`, but among equally near candidates prefers the one
+/// with the lowest `focus_rank` (most recently focused), as tmux does.
+pub fn find_in_direction_by_recency(
+    focused: &PaneInfo,
+    direction: NavDirection,
+    panes: &[PaneInfo],
+    focus_rank: impl Fn(PaneId) -> usize,
 ) -> Option<PaneId> {
     let fr = focused.rect;
 
@@ -418,7 +453,13 @@ pub fn find_in_direction(
                     range_center_distance(r.x, r.width, fr.x, fr.width)
                 }
             };
-            (edge_distance, Reverse(overlap), center_distance, *index)
+            (
+                edge_distance,
+                focus_rank(p.id),
+                Reverse(overlap),
+                center_distance,
+                *index,
+            )
         })
         .map(|(_, p)| p.id)
 }
@@ -1344,5 +1385,47 @@ mod tests {
         assert_eq!(layout.focused(), pane(4));
         assert!(layout.close_focused());
         assert_eq!(layout.focused(), pane(2));
+    }
+
+    #[test]
+    fn find_in_direction_by_recency_returns_to_last_visited_row() {
+        // | 1 | 2 |
+        // |   | 3 |
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+        let area = Rect::new(0, 0, 100, 40);
+        let step = |layout: &mut TileLayout, direction: NavDirection| {
+            let panes = layout.panes(area);
+            let focused = panes.iter().find(|p| p.is_focused).unwrap();
+            let target = find_in_direction_by_recency(focused, direction, &panes, |id| {
+                layout.focus_rank(id)
+            })
+            .unwrap();
+            layout.focus_pane(target);
+            target
+        };
+
+        // With no history, the first aligned pane still wins.
+        assert_eq!(step(&mut layout, NavDirection::Right), pane(2));
+        assert_eq!(step(&mut layout, NavDirection::Down), pane(3));
+        assert_eq!(step(&mut layout, NavDirection::Left), pane(1));
+        assert_eq!(step(&mut layout, NavDirection::Right), pane(3));
+
+        // Closing the remembered pane drops it from the history.
+        layout.focus_pane(pane(1));
+        assert!(layout.close_pane(pane(3)));
+        assert_eq!(layout.focus_rank(pane(3)), usize::MAX);
     }
 }
